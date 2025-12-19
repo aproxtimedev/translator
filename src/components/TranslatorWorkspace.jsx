@@ -17,6 +17,7 @@ const TranslatorWorkspace = () => {
     const [isExporting, setIsExporting] = useState(false);
     const [detections, setDetections] = useState([]);
     const [isDetecting, setIsDetecting] = useState(false);
+    const [isAutoTranslating, setIsAutoTranslating] = useState(false);
 
     // Settings for the next translation OR current selection
     const [targetLang, setTargetLang] = useState('English');
@@ -97,10 +98,82 @@ const TranslatorWorkspace = () => {
         };
         setCrop(newCrop);
 
-        // Optional: Trigger translation immediately? 
+        // Optional: Trigger translation immediately?
         // For now, let's just select it. User can click Translate.
         // Or we can auto-trigger:
         // await handleTranslateWithCrop(newCrop);
+    };
+
+    const handleAutoTranslate = async () => {
+        if (!imageSrc || !imgRef.current) return;
+        setIsAutoTranslating(true);
+        setLoading(true); // Block other actions
+
+        try {
+            // 1. Detect
+            const response = await fetch(imageSrc);
+            const blob = await response.blob();
+            const detectedBoxes = await detectSpeechBalloons(blob);
+            setDetections(detectedBoxes);
+
+            if (detectedBoxes.length === 0) {
+                alert("No speech balloons detected.");
+                return;
+            }
+
+            // 2. Process each box
+            // We use a simple loop or Promise.all.
+            // Warning: Promise.all might hit rate limits if many balloons.
+            // Let's do batching or sequence if safer, but G gemini is usually ok with a few parallel.
+
+            const newTranslations = [];
+
+            // Using logic from handleDetectionClick + handleTranslate
+            const processBox = async (box) => {
+                const scaled = getScaledBox(box.box);
+                if (!scaled) return null;
+
+                const cropForCanvas = {
+                    unit: 'px',
+                    x: scaled.x,
+                    y: scaled.y,
+                    width: scaled.width,
+                    height: scaled.height
+                };
+
+                try {
+                    const base64Image = getCroppedImg(imgRef.current, cropForCanvas);
+                    const text = await translateImageText(base64Image, targetLang);
+
+                    return {
+                        id: Date.now() + Math.random(), // Unique ID
+                        crop: cropForCanvas,
+                        text: text,
+                        textColor: textColor,
+                        backgroundColor: bgColor,
+                        fontSize: fontSize
+                    };
+                } catch (e) {
+                    console.error("Failed to translate box", e);
+                    return null;
+                }
+            };
+
+            // Run in parallel
+            const results = await Promise.all(detectedBoxes.map(processBox));
+
+            // Filter out failures
+            const validResults = results.filter(r => r !== null);
+
+            setTranslations(prev => [...prev, ...validResults]);
+
+        } catch (error) {
+            console.error(error);
+            alert("Auto Translate failed: " + error.message);
+        } finally {
+            setIsAutoTranslating(false);
+            setLoading(false);
+        }
     };
 
     const handleTranslate = async () => {
@@ -228,7 +301,7 @@ const TranslatorWorkspace = () => {
 
     return (
         <div className="max-w-4xl mx-auto p-6" onMouseUp={handleWindowMouseUp}>
-            <h1 className="text-3xl font-bold text-center mb-8 text-gray-800">Manual Web Image Translator</h1>
+            <h1 className="text-3xl font-bold text-center mb-8 text-gray-800">Auto Web Image Translator</h1>
 
             {!imageSrc ? (
                 <ImageUploader onImageUpload={handleImageUpload} />
@@ -307,6 +380,13 @@ const TranslatorWorkspace = () => {
                                 disabled={isDetecting || loading || !imageSrc}
                             >
                                 {isDetecting ? 'Detecting...' : '✨ Auto Detect'}
+                            </button>
+                            <button
+                                onClick={handleAutoTranslate}
+                                className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 transition disabled:opacity-50 flex items-center gap-2 shadow-sm"
+                                disabled={isAutoTranslating || loading || !imageSrc}
+                            >
+                                {isAutoTranslating ? 'Processing...' : '⚡ Auto Translate'}
                             </button>
                             <button
                                 onClick={async () => {
