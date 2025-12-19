@@ -4,6 +4,7 @@ import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { getCroppedImg } from '../utils/canvasUtils';
 import { translateImageText } from '../services/gemini';
+import { detectSpeechBalloons } from '../services/detection';
 import TranslationOverlay from './TranslationOverlay';
 import EditModal from './EditModal';
 import html2canvas from 'html2canvas';
@@ -13,6 +14,9 @@ const TranslatorWorkspace = () => {
     const [crop, setCrop] = useState();
     const [translations, setTranslations] = useState([]); // Array of { id, crop, text, textColor, backgroundColor, fontSize }
     const [loading, setLoading] = useState(false);
+    const [isExporting, setIsExporting] = useState(false);
+    const [detections, setDetections] = useState([]);
+    const [isDetecting, setIsDetecting] = useState(false);
 
     // Settings for the next translation OR current selection
     const [targetLang, setTargetLang] = useState('English');
@@ -34,8 +38,69 @@ const TranslatorWorkspace = () => {
         setImageSrc(src);
         setCrop(undefined);
         setTranslations([]);
+        setDetections([]);
         setIsModalOpen(false);
         setSelectedId(null);
+    };
+
+    const handleAutoDetect = async () => {
+        if (!imageSrc) return;
+        setIsDetecting(true);
+        try {
+            // Convert imageSrc (blob url or base64) to Blob for API
+            const response = await fetch(imageSrc);
+            const blob = await response.blob();
+
+            const detectedBoxes = await detectSpeechBalloons(blob);
+            setDetections(detectedBoxes);
+        } catch (error) {
+            alert("Detection failed: " + error.message);
+        } finally {
+            setIsDetecting(false);
+        }
+    };
+
+    // Helper to scale API box (natural coords) to rendered image coords
+    const getScaledBox = (box) => {
+        if (!imgRef.current) return null;
+
+        const naturalWidth = imgRef.current.naturalWidth;
+        const naturalHeight = imgRef.current.naturalHeight;
+        const width = imgRef.current.width;
+        const height = imgRef.current.height;
+
+        const scaleX = width / naturalWidth;
+        const scaleY = height / naturalHeight;
+
+        // API returns [x1, y1, x2, y2]
+        const [x1, y1, x2, y2] = box;
+
+        return {
+            x: x1 * scaleX,
+            y: y1 * scaleY,
+            width: (x2 - x1) * scaleX,
+            height: (y2 - y1) * scaleY
+        };
+    };
+
+    const handleDetectionClick = async (box) => {
+        const scaled = getScaledBox(box);
+        if (!scaled) return;
+
+        // Set crop to the detected zone
+        const newCrop = {
+            unit: 'px',
+            x: scaled.x,
+            y: scaled.y,
+            width: scaled.width,
+            height: scaled.height
+        };
+        setCrop(newCrop);
+
+        // Optional: Trigger translation immediately? 
+        // For now, let's just select it. User can click Translate.
+        // Or we can auto-trigger:
+        // await handleTranslateWithCrop(newCrop);
     };
 
     const handleTranslate = async () => {
@@ -237,22 +302,29 @@ const TranslatorWorkspace = () => {
                                 {loading ? 'Translating...' : 'Translate Selection'}
                             </button>
                             <button
+                                onClick={handleAutoDetect}
+                                className="px-4 py-1.5 text-sm bg-purple-600 text-white rounded hover:bg-purple-700 transition disabled:opacity-50 flex items-center gap-2 shadow-sm"
+                                disabled={isDetecting || loading || !imageSrc}
+                            >
+                                {isDetecting ? 'Detecting...' : '✨ Auto Detect'}
+                            </button>
+                            <button
                                 onClick={async () => {
                                     if (!containerRef.current) return;
-                                    setLoading(true); // Show loading during export
+                                    setIsExporting(true); // Start clean export
 
-                                    // Temporarily deselect any active overlay to remove selection border
+                                    // Temporarily deselect overlay and detection
                                     const currentSelection = selectedId;
                                     setSelectedId(null);
 
-                                    // Small delay to allow React to re-render without selection border
+                                    // Wait for render to clear UI elements
                                     await new Promise(resolve => setTimeout(resolve, 100));
 
                                     try {
                                         const canvas = await html2canvas(containerRef.current, {
-                                            useCORS: true, // Handle cross-origin images if necessary
-                                            scale: 2, // Higher quality
-                                            backgroundColor: null, // Transparent background if any
+                                            useCORS: true,
+                                            scale: 2,
+                                            backgroundColor: null,
                                         });
 
                                         const link = document.createElement('a');
@@ -263,14 +335,15 @@ const TranslatorWorkspace = () => {
                                         console.error("Export failed:", error);
                                         alert("Failed to export image.");
                                     } finally {
-                                        // Restore selection
+                                        // Restore state
                                         setSelectedId(currentSelection);
-                                        setLoading(false);
+                                        setIsExporting(false);
                                     }
                                 }}
-                                className="px-4 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700 transition shadow-sm flex items-center gap-2"
+                                className="px-4 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700 transition shadow-sm flex items-center gap-2 disabled:opacity-50"
+                                disabled={isExporting || !imageSrc}
                             >
-                                Export Image
+                                {isExporting ? 'Exporting...' : 'Export Image'}
                             </button>
                         </div>
                     </div>
@@ -290,6 +363,29 @@ const TranslatorWorkspace = () => {
                             />
                         </ReactCrop>
 
+                        {/* Render Detected Zones (Only when not exporting) */}
+                        {!isExporting && detections.map((d, i) => {
+                            const style = getScaledBox(d.box);
+                            if (!style) return null;
+                            return (
+                                <div
+                                    key={i}
+                                    className="absolute border-2 border-dashed border-purple-500 bg-purple-500/10 cursor-pointer hover:bg-purple-500/20 transition-colors z-0"
+                                    style={{
+                                        left: style.x,
+                                        top: style.y,
+                                        width: style.width,
+                                        height: style.height
+                                    }}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDetectionClick(d.box);
+                                    }}
+                                    title="Click to translate"
+                                />
+                            );
+                        })}
+
                         {translations.map((t) => (
                             <TranslationOverlay
                                 key={t.id}
@@ -299,6 +395,7 @@ const TranslatorWorkspace = () => {
                                 backgroundColor={t.backgroundColor}
                                 fontSize={t.fontSize}
                                 isSelected={selectedId === t.id}
+                                isExporting={isExporting}
                                 onMouseDown={(e) => handleOverlayMouseDown(e, t.id)}
                                 onClose={() => handleDeleteTranslation(t.id)}
                             />
